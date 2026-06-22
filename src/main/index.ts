@@ -826,55 +826,66 @@ function registerIpcHandlers(): void {
   ipcMain.handle('plans:scanNodes', async (_e, planIds: number[]) => {
     if (!walletState.readonlyClient) return { success: false, error: 'No RPC client', nodesMap: {} }
     const nodesMap: Record<number, any[]> = {}
-    
-    // Concurrency limit: 5 — keep fan-out small to stay under RPC 429 rate limits.
+
+    // Plans whose scan ultimately FAILED (vs. genuinely 0 nodes). The renderer hides
+    // empty plans; if it cannot tell "throttled away" from "truly empty" it hides the
+    // entire list on a transient RPC hiccup ("plans/nodes empty, no error"). Surface
+    // these so the UI keeps a failed plan visible instead of dropping it.
+    const failed: number[] = []
+
+    // Concurrency 5 with a single retry on transient failure. Most plans have 0 nodes,
+    // but the ~handful that DO can return hundreds (e.g. plan 36 → 726 nodes), and a
+    // 110-plan list at high concurrency was bursty enough to trip public-RPC rate limits
+    // — every call would then reject, the map came back all-empty, and the renderer
+    // filtered out every plan. Small fan-out + retry keeps the real plans surfacing.
     const CHUNK_SIZE = 5
-    const chunks = []
-    for (let i = 0; i < planIds.length; i += CHUNK_SIZE) {
-      chunks.push(planIds.slice(i, i + CHUNK_SIZE))
+    const scanOne = async (id: number, attempt = 0): Promise<void> => {
+      try {
+        // STATUS_UNSPECIFIED (0 = all linked nodes), not STATUS_ACTIVE — the active
+        // subset can momentarily be 0 even for a populated plan, which would wrongly
+        // hide it. Full key-based pagination so large plans aren't truncated.
+        const nodesRaw = await queryAllWithPagination(
+          (pageReq) => walletState.readonlyClient!.sentinelQuery!.node.nodesForPlan(
+            Long.fromNumber(id, true),
+            Status.STATUS_UNSPECIFIED,
+            pageReq
+          ),
+          (res) => res?.nodes ?? [],
+          `scanNodes#${id}`
+        )
+        nodesMap[id] = nodesRaw.map(n => ({
+          address: n.address,
+          moniker: n.address.slice(0, 12) + '...',
+          version: (n as any).version || '',
+          type: 1,
+          isActive: n.status === Status.STATUS_ACTIVE,
+          isHealthy: true,
+          country: '??',
+          city: '',
+          gigabytePrices: n.gigabytePrices.map(p => ({ denom: p.denom, value: p.quoteValue })),
+          hourlyPrices: n.hourlyPrices.map(p => ({ denom: p.denom, value: p.quoteValue })),
+          sessions: 0,
+          peers: 0,
+          isResidential: false,
+          isWhitelisted: false,
+          isDuplicate: false,
+          errorMessage: null,
+          fetchedAt: new Date().toISOString()
+        }))
+      } catch (err) {
+        if (attempt < 1) { await delay(400 * (attempt + 1)); return scanOne(id, attempt + 1) }
+        console.error(`[IPC] Error scanning plan ${id} (after retry):`, err)
+        nodesMap[id] = []
+        failed.push(id)
+      }
     }
 
-    for (let ci = 0; ci < chunks.length; ci++) {
-      const chunk = chunks[ci]
+    for (let i = 0; i < planIds.length; i += CHUNK_SIZE) {
       // Pace successive chunks so a large plan set doesn't hammer the endpoint.
-      if (ci > 0) await delay(250)
-      await Promise.all(chunk.map(async (id) => {
-        try {
-          const nodesRaw = await queryAllWithPagination(
-            (pageReq) => walletState.readonlyClient!.sentinelQuery!.node.nodesForPlan(
-              Long.fromNumber(id, true),
-              Status.STATUS_UNSPECIFIED,
-              pageReq
-            ),
-            (res) => res?.nodes ?? [],
-            `scanNodes#${id}`
-          )
-          nodesMap[id] = nodesRaw.map(n => ({
-            address: n.address,
-            moniker: n.address.slice(0, 12) + '...',
-            version: (n as any).version || '',
-            type: 1, 
-            isActive: n.status === Status.STATUS_ACTIVE,
-            isHealthy: true,
-            country: '??',
-            city: '',
-            gigabytePrices: n.gigabytePrices.map(p => ({ denom: p.denom, value: p.quoteValue })),
-            hourlyPrices: n.hourlyPrices.map(p => ({ denom: p.denom, value: p.quoteValue })),
-            sessions: 0,
-            peers: 0,
-            isResidential: false,
-            isWhitelisted: false,
-            isDuplicate: false,
-            errorMessage: null,
-            fetchedAt: new Date().toISOString()
-          }))
-        } catch (err) {
-          console.error(`[IPC] Error scanning plan ${id}:`, err)
-          nodesMap[id] = []
-        }
-      }))
+      if (i > 0) await delay(250)
+      await Promise.all(planIds.slice(i, i + CHUNK_SIZE).map(id => scanOne(id)))
     }
-    return { success: true, nodesMap }
+    return { success: true, nodesMap, failed }
   })
 
   ipcMain.handle('provider:info', async (_e, address: string) => {
