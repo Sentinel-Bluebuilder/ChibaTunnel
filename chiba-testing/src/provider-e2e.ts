@@ -463,8 +463,26 @@ export async function runProviderE2E(opts: ProviderOptions, ctx: InvokeContext, 
       const vpnType = conn.vpnType ?? targetNode.type
       step(reporter, 'subscription:connect(provider)', `LIVE session up on own plan→leased node ${targetNode.address} (vpnType=${vpnType}) — full provider→consumer round trip`, 'pass', Date.now() - t)
       await new Promise((r) => setTimeout(r, STEP_GAP_MS))
-      // bring the OS tunnel up so the connect actually reaches the node.
-      if (vpnType === 'wireguard' && hasChannel('node:connectWireguard')) {
+      // Bring the OS tunnel up so the connect actually reaches the node. This step
+      // needs the privileged ChibaTunnelHelper service (it spawns tun2socks / brings
+      // up the WireGuard adapter as SYSTEM). The harness deliberately does NOT auto-
+      // install the helper, so on a host where it isn't running this would FAIL — a
+      // misleading result, since the on-chain round trip already fully succeeded and
+      // the failure is purely "host not provisioned". Preflight the helper and SKIP
+      // (not FAIL) when it's absent. Run the helper elevated (`npm run dev:helper`,
+      // or the installed ChibaTunnelHelper service) to exercise the real tunnel.
+      const helperPing = hasChannel('test:helperAlive')
+        ? ((await invoke('test:helperAlive')) as { alive?: boolean })
+        : { alive: undefined as boolean | undefined }
+      if (helperPing.alive === false) {
+        step(
+          reporter,
+          `node:connect${vpnType === 'wireguard' ? 'Wireguard' : 'V2ray'}(provider)`,
+          'privileged ChibaTunnelHelper service not running — OS tunnel cannot be brought up from the harness ' +
+            '(run it elevated: `npm run dev:helper`). On-chain round trip already verified; skipping tunnel bring-up.',
+          'skip',
+        )
+      } else if (vpnType === 'wireguard' && hasChannel('node:connectWireguard')) {
         const up = (await invoke('node:connectWireguard')) as { success?: boolean; error?: string }
         step(reporter, 'node:connectWireguard(provider)', up?.success === true ? 'WireGuard tunnel UP against self-leased node' : `WG up failed: ${up?.error ?? 'unknown'}`, up?.success === true ? 'pass' : 'fail')
       } else if (vpnType === 'v2ray' && hasChannel('node:connectV2ray')) {

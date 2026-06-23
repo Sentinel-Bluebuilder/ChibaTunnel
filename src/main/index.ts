@@ -1313,6 +1313,21 @@ function registerIpcHandlers(): void {
   // caller-supplied [{ typeUrl, value }] array through the same path every other tx uses.
   // It is dead code in production (the env guard means it is never registered).
   if (IS_TEST_HARNESS) {
+    // Preflight: is the privileged ChibaTunnelHelper reachable? The harness skips the
+    // helper auto-install (it must never silently elevate), so on a host where the
+    // service is not running the OS-tunnel step (transparent V2Ray / WireGuard) cannot
+    // succeed. The provider E2E pings this BEFORE the tunnel step so it can report an
+    // honest SKIP ("helper not running") instead of a misleading FAIL — the FAIL would
+    // otherwise conflate "code broke" with "host not provisioned". Read-only, no spend.
+    ipcMain.handle('test:helperAlive', async () => {
+      try {
+        const alive = await pingHelper()
+        return { success: true, alive }
+      } catch (err: unknown) {
+        return { success: false, alive: false, error: extractError(err) }
+      }
+    })
+
     // Full on-chain hourly Price for a node ({ denom, baseValue, quoteValue }). The public
     // node:info channel drops baseValue (returns only { denom, value }), but MsgStartLease's
     // maxPrice needs the full Price. The harness uses this to (a) enforce the lease-cost
