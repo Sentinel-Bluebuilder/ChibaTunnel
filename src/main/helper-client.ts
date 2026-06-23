@@ -173,25 +173,31 @@ export function sendToHelper(
     socket.on('error', (err: NodeJS.ErrnoException) => {
       if (settled) return // timeout already fired
 
-      // ENOENT means the pipe does not exist — helper is not running.
+      // ENOENT (named pipe missing) and ECONNREFUSED (TCP port not listening)
+      // both mean the same thing: the ChibaTunnelHelper service is not running.
+      // NOTE: these MUST be mutually exclusive branches. A prior version wrote
+      // `} if (err.code === 'ECONNREFUSED')` instead of `} else if`, which left
+      // the ENOENT case falling through into the generic `else` and double-calling
+      // finish() — harmless only because of the `settled` guard. Keep `else if`.
+      const transport = useNamedPipe === true ? PIPE_PATH : `${HELPER_HOST}:${HELPER_PORT}`
       if (err.code === 'ENOENT') {
         finish({
           status: 'error',
           error:
-            'Named Pipe not found. The ChibaTunnelHelper service is not running. ' +
+            `Named Pipe not found (${transport}). The ChibaTunnelHelper service is not running. ` +
             'In development: start it with "npm run dev:helper" in an elevated terminal.',
         })
-      } if (err.code === 'ECONNREFUSED') {
+      } else if (err.code === 'ECONNREFUSED') {
         finish({
           status: 'error',
           error:
-            'Connection refused on 127.0.0.1:47391. The ChibaTunnelHelper service is not running. ' +
+            `Connection refused on ${transport}. The ChibaTunnelHelper service is not running. ` +
             'In development: start it with "npm run dev:helper" in an elevated terminal.',
         })
       } else {
         finish({
           status: 'error',
-          error: `Pipe connection error [${err.code ?? 'UNKNOWN'}]: ${err.message}`,
+          error: `Helper connection error [${err.code ?? 'UNKNOWN'}] on ${transport}: ${err.message}`,
         })
       }
     })
